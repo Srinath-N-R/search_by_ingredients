@@ -151,10 +151,13 @@ def search_food_catch_all(query, page_size = 20, alpha = 0.3):
 def pick_usda_hit(query):
     '''
     Returns the best USDA fdc_id, usda_name after searching from USDA API.
+    Search is designed to hit SR-Legacy as much as possible. This keeps the search less noisy. And keeps the macronutrient calculation very simple.
+    The least common is BRANDED.
     '''
 
     ranked = search_food(query, page_size=20)
-    
+
+    # If there is no SR_Legacy search results or if the top result isn't similar to the search query, we run the catch all search.
     if not ranked or not ranked[0][-3] > 0.7:
         ranked = search_food_catch_all(query, page_size=20)     
     return ranked[0][:2]
@@ -168,7 +171,7 @@ def pick_usda_hit_cached(ingredient):
     '''
     Caches the fdc_id and usda_name for the query ingredient after searching it using pick_usda_hit.
     If there is a cache hit, there is no need for an API call.
-    If not, it will search the API and save the result to disk.
+    If no cache hit, it will call the API and save the result to disk.
     '''
 
     key = ingredient.strip().lower()
@@ -196,9 +199,9 @@ _CACHE_DIR.mkdir(exist_ok=True)
 
 def fetch_food_cached(fdc_id):
     '''
-    Caches the result for the fcid ingredient after running fetch_food.
+    Caches the result for the fcid after running fetch_food function.
     If there is a cache hit, there is no need for an API call.
-    If not, it will hit the API and save the result as a JSON to disk.
+    If no cache hit, it will call the API and save the result to disk.
     '''
     path = _CACHE_DIR / f"{fdc_id}.json"
     if path.exists():
@@ -212,10 +215,9 @@ def fetch_food_cached(fdc_id):
 def get_macronutrients(info: dict) -> dict:
     '''
     Returns a dict with carbs_g, protein_g, fat_g, fiber_g, calories, basis_g.
-    The calculations vary depending on the search type. The most common is SR-Legacy. The least common is BRANDED.
-    Branded food items have a different type of caloric calculation because they have custom serving size units.
-    SR-Legacy has calroc information per 100-g
-
+    SR-Legacy and most item types have caloric data per 100-g.
+    Branded item types have caloric data per custom serving sizes. 
+    The caloric data per custom serving sizes can be reliably converted to caloric data per grams. 
     '''
     m = {
         "carbs_g":   None,
@@ -227,8 +229,9 @@ def get_macronutrients(info: dict) -> dict:
         "source":    "foodNutrients",
     }
 
-    # Branded Items have custom serving units, Since we rarely query branded ITEMS this won't come to use.
-    # We are converting all units to gram equivalents because most of our caloric values are retrieved per 100 grams.
+    # Branded Items have custom serving sizes.
+    # We convert these custom serving sizes to gram equivalents.
+    # Only Branded Items have labelNutrients.
     if "labelNutrients" in info:
         unit = str(info.get("servingSizeUnit", "")).strip().lower()
         size = float(info.get("servingSize") or 1.0)
@@ -275,6 +278,9 @@ def get_macronutrients(info: dict) -> dict:
 
 
 def override_macronutrients(macros, ingredient_name):
+    '''
+    Stuff like water, ice cubes, sweetners, and small spices can be reliable over-ridden to 0 calories with 0 macro-nutrient values.
+    '''
     if ingredient_name in _ZERO_NET:
         macros = dict(carbs_g=0, protein_g=0, fat_g=0, fiber_g=0, calories=0, basis_g=1, source="override")
     return macros
@@ -300,27 +306,28 @@ def _as_float(q):
 
 
 # precomputing embeddings for CATEGORIES of items.
-_EMBS = np.stack([_embedding(c) for c in _CAT_NAMES])
+_EMBS = np.stack([_embedding(CAT) for CAT in _CAT_NAMES])
 
 
-def estimate_weight(line):
+def estimate_weight(item):
     '''
     Estimates the weight of an item in grams when the unit is not given. 
-    For items where there is no unit associated with it, we identify what category this item roughly belongs to using sentence embedding similarity.
-    Then, we return the weight associated for the category the item belongs to.
+    For items where there are no units specified, we roughly estimate a weight for that item.
+    This happens by identifying what product category an item roughly belongs to by computing item-category similarity using sentence embeddings. 
+    Then, we return the weight associated with that product category.
 
-    EX: 
+    EX:
     "a pinch of tiny spice like salt, pepper, yeast, cayenne, paprika, cumin, turmeric, nutmeg, cloves, oregano, cardamom, cinnamon": 2 grams.
     "a small piece of meat like chicken breast, pork loin, cod fillet, tofu slab, tempeh slice": 100 grams.
     "one large shellfish like lobster tail, king crab leg": 90 grams.
     '''
-    best = int(np.argmax(_EMBS @ _embedding(line)))
+    best = int(np.argmax(_EMBS @ _embedding(item)))
     return float(_CAT_WEIGHTS[best])
 
 
 def _unit_to_grams(info, unit):
     '''
-    Convert the unit of food items to grams.
+    Convert the unit to gram equivalent.
     '''
 
     # If there is no input unit, we just return None.
@@ -328,7 +335,8 @@ def _unit_to_grams(info, unit):
     if not unit_lc:
         return None
     
-    # If there is a gram weight listed in INFO we simply return that.
+    # If there is a gram weight associated to a unit in the USDA API result, we simply use that
+    # This for-loop can be potentially removed and the code would run just fine. This is just a precautionary step.
     for p in info.get("foodPortions", []):
         mu = (p.get("measureUnit", {}) or {}).get("name", "").lower().rstrip("s")
         if unit_lc == mu:
@@ -336,7 +344,7 @@ def _unit_to_grams(info, unit):
             if g:
                 return g
         desc = str(p.get("portionDescription", "")).lower()
-        if unit_lc in desc.split():  # crude but works for "clove", "slice"
+        if unit_lc in desc.split():
             g = p.get("gramWeight")
             if g:
                 return g
@@ -356,7 +364,7 @@ def _scale_macros(macros, grams_needed):
     If the USDA record lacks an explicit calorie value, calories are back-filled using the classic 4-4-9 rule:
     kcal = carbs*4 + protein*4 + fat*9
     '''
-
+    # scales the macros of the ingredient to the grams observed in the recipe.
     factor = grams_needed / (macros["basis_g"] or 100)
     result = {}
     for k in ("carbs_g", "protein_g", "fat_g", "fiber_g", "calories"):
