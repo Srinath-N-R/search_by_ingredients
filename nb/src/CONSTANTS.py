@@ -2,14 +2,10 @@ import re
 import numpy as np
 
 
-_MASS_UNITS_SINGULAR = [
-    'teaspoon', 'tablespoon', 'cup', 'ounce', 'pound', 'clove', 'can', 'slice', 
-    'head', 'package', 'quart', 'pint', 'liter', 'gram', 'kilogram'
-]
-
 _NUMBER_RE = re.compile(r"^[\d\.\u00bc-\u00be\u2150-\u215e/ ]+$")
 
 
+# unit to gram conversion
 _FALLBACK_GRAMS = {
     # mass units
     "mg": 0.001,
@@ -26,7 +22,7 @@ _FALLBACK_GRAMS = {
     "pound": 453.592,
     "pounds": 453.592,
 
-    # volume units (≈ water density)
+    # volume units
     "ml": 1,
     "milliliter": 1,
     "millilitre": 1,
@@ -52,21 +48,18 @@ _FALLBACK_GRAMS = {
     "qt": 946,
 
     # recipe-specific heuristics
-    "clove": 3,      # average garlic clove
+    "clove": 3,
     "cloves": 3,
-    "slice": 28,     # bread slice
+    "slice": 28,
     "slices": 28,
-    "can": 425,      # 15-oz US retail
+    "can": 425,
     "cans": 425,
     "small can": 170,
     "large can": 794,
-    "head": 300,     # lettuce/cabbage head
+    "head": 300,
     "heads": 300,
-    "package": 500,  # generic “pack” – adjust as needed
+    "package": 500,
     "packages": 500,
-
-    "clove": 3,
-    "slice": 28,
     "rib": 40,
     "leaf": 5,
     "pinch": 0.36,
@@ -80,11 +73,11 @@ _FALLBACK_GRAMS = {
     "jar": 350,
 }
 
-# Fast membership lookup
-_MASS_UNITS = {u for u, g in _FALLBACK_GRAMS.items() if g >= 1}   # ≈ all but mg
+# Fast unit lookup
+_MASS_UNITS = set(sorted(_FALLBACK_GRAMS.keys(), key=len, reverse=True))
 
 
-
+# Product-weight categories
 _CATS = {
     # DRIED / POWDER SPICES
     "a pinch of tiny spice like salt, pepper, yeast, cayenne, paprika, cumin, turmeric, nutmeg, cloves, oregano, cardamom, cinnamon": 2,
@@ -160,53 +153,68 @@ _CATS = {
 }
 
 
+# fast product category lookup
 _CAT_NAMES   = list(_CATS)
 _CAT_WEIGHTS = np.array([_CATS[c] for c in _CAT_NAMES], dtype=float)
 
 
-
-
 _ZERO_NET = {
-    # ────────────────────────────────────────────────────────────
-    # 1) High-intensity / sugar-alcohol sweeteners & brand names
-    # ────────────────────────────────────────────────────────────
-    "splenda", "sucralose",
-    "erythritol",           # incl. blends like 'Swerve'
+    # High-intensity / sugar-alcohol sweeteners & brand names
+    "splenda", 
+    "sucralose",
+    "erythritol",
     "allulose",
-    "stevia", "stevia extract", "reb a", "rebiana",
-    "monk fruit", "lo han guo", "luo han guo",
-    "truvia", "purevia", "pyure", "lakanto", "swerve",
-    "xylitol", "birch sugar",
-    "maltitol", "sorbitol", "mannitol",   # optional: has lax net carbs, often counted as 0
-    "isomalt", "erylite",
-    "aspartame", "acesulfame potassium", "ace k",
-    "saccharin", "cyclamate", "advantame", "neotame",
+    "stevia", 
+    "stevia extract", 
+    "reb a", 
+    "rebiana",
+    "monk fruit", 
+    "lo han guo", 
+    "luo han guo",
+    "truvia",
+    "purevia", 
+    "pyure", 
+    "lakanto", 
+    "swerve",
+    "xylitol", 
+    "birch sugar",
+    "maltitol", 
+    "sorbitol", 
+    "mannitol",
+    "isomalt", 
+    "erylite",
+    "aspartame", 
+    "acesulfame potassium", 
+    "ace k",
+    "saccharin", 
+    "cyclamate", 
+    "advantame", 
+    "neotame",
 
-    # ────────────────────────────────────────────────────────────
-    # 2) Water & zero-nutrient liquids / solids
-    # ────────────────────────────────────────────────────────────
-    "water", "tap water", "distilled water",
-    "sparkling water", "seltzer", "club soda", "carbonated water",
-    "ice", "ice cube", "ice cubes",
-    "coffee", "black coffee", "espresso",
-    "tea", "black tea", "green tea", "herbal tea",
-    "diet soda", "diet cola",  # most have <1 kcal; safe to treat as 0
+    # Water & zero-nutrient liquids / solids
+    "water", 
+    "tap water", 
+    "distilled water",
+    "sparkling water", 
+    "seltzer", 
+    "ice", 
+    "ice cube", 
+    "ice cubes",
+    "diet soda", 
+    "diet cola",
 
-    # ────────────────────────────────────────────────────────────
-    # 3) Pure seasonings & additives that are calorically nil
-    # (USDA often shows <1 kcal per serving, but we can skip)
-    # ────────────────────────────────────────────────────────────
-    "salt", "sea salt", "kosher salt", "pink salt",
-    "baking soda", "sodium bicarbonate",
-    "cream of tartar", "tartaric acid",
-    "baking powder",
-    "yeast nutrient",   # tiny amounts
-    "citric acid", "ascorbic acid", "potassium sorbate",
-    "food coloring", "gel food coloring",
-    "vanilla essence", "vanilla extract",  # carbs <0.5 g per tsp
-    "almond extract", "peppermint extract",
-    "vinegar", "white vinegar", "apple cider vinegar",
+    # Pure seasonings & additives that are calorically nil
+    "salt", 
+    "sea salt", 
+    "kosher salt", 
+    "pink salt",
+    "baking soda", 
+    "sodium bicarbonate",
+    "yeast nutrient",
+    "citric acid", 
+    "ascorbic acid", 
+    "potassium sorbate",
+    "food coloring", 
+    "gel food coloring",
     "liquid smoke",
-
-
 }

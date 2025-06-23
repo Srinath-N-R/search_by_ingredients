@@ -3,18 +3,16 @@ import re
 from functools import lru_cache
 
 import numpy as np
-import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
 
 import json
 import pathlib
 import hashlib
+from time import time
 
-
-from CONSTANTS import (_MASS_UNITS, _MASS_UNITS_SINGULAR, _NUMBER_RE, _FALLBACK_GRAMS, 
-                        _CATS, _CAT_NAMES, _CAT_WEIGHTS, _ZERO_NET)
+from CONSTANTS import (_MASS_UNITS, _NUMBER_RE, _FALLBACK_GRAMS, 
+                        _CAT_NAMES, _CAT_WEIGHTS, _ZERO_NET)
 
 
 API_KEY = "MdvR7gqeWDCMVDsspxgLNGqkjU8HNFNe3yoXlYER"
@@ -57,12 +55,13 @@ def parse_ingredient(line: str) -> dict:
 
     # Parse Unit
     outer_unit = ''
-    for u in sorted(_MASS_UNITS_SINGULAR, key=len, reverse=True):
-        if rest.lower().startswith(u + 's '):
-            outer_unit, rest = u, rest[len(u) + 1:].lstrip()
-            break
-        elif rest.lower().startswith(u + ' '):
+    rest_lc = rest.lower()
+    for u in _MASS_UNITS:
+        if rest_lc.startswith(u + ' '):
             outer_unit, rest = u, rest[len(u):].lstrip()
+            break
+        if rest_lc == u:
+            outer_unit, rest = u, ''
             break
 
     # Parse Ingredient
@@ -158,7 +157,7 @@ def pick_usda_hit(query):
     ranked = search_food(query, page_size=20)
 
     # If there is no SR_Legacy search results or if the top result isn't similar to the search query, we run the catch all search.
-    if not ranked or not ranked[0][-3] > 0.7:
+    if not ranked or not ranked[0][-3] > 0.8:
         ranked = search_food_catch_all(query, page_size=20)     
     return ranked[0][:2]
 
@@ -377,3 +376,133 @@ def _scale_macros(macros, grams_needed):
             result["carbs_g"] * 4 + result["protein_g"] * 4 + result["fat_g"] * 9
         )
     return result
+
+
+def is_keto(ingredients, verbose: bool = False):
+    """
+    Determine whether a recipe is ketogenic (≤ 20 % of calories from net carbs).
+
+
+    Workflow (high-level)
+
+    1. Parse each line with parse_ingredient
+       - extracts quantity / unit / ingredient / preparation  
+       - weights inside parenthetical overrides outer quantity if present
+
+    2. Resolve the ingredient to a USDA FDC record  
+       - re-ranked results from API using a hybrid metric: semantic similarity + search score
+       - result cached on disk to avoid redundant API calls
+
+    3. Fetch full nutrient data (cached).
+
+    4. Apply heuristics 
+       - _unit_to_grams converts declared unit ---> grams using foodPortions or _FALLBACK_GRAMS ENUMS  
+       - if unit absent, estimate_weight guesses a default weight via sentence embedding similarity to category archetypes  
+       - certain zero-impact items (water, salt, artificial sweetners) override macros to 0
+
+    5. Scale the per-basis macros to the grams actually used, aggregate them for the whole recipe, and compute:
+         net_carbs = max(total_carbs − total_fiber, 0)  
+         carb_pct  = (net_carbs × 4 kcal/g) / total_calories × 100
+
+    6. Classify as keto if `carb_pct` ≤ 20 %.
+
+    Notes
+       - The 20 % threshold is deliberately lenient to offset uncertainty in
+      weight-guessing and label inaccuracies.
+       - Any exception inside the per-ingredient loop is caught and logged so a
+      single bad line does not abort the entire evaluation; the outer `try`
+      ensures a final Boolean is always returned.
+    """
+
+    try:
+        if verbose:
+            print(ingredients)
+
+        # running totals for the whole recipe
+        row_macros = dict(carbs=0.0, protein=0.0, fat=0.0, fiber=0.0, calories=0.0)
+
+        for line in ingredients:
+            try:
+                if verbose:
+                    print(line)
+
+                start_ = time()  # performance timing
+
+                # Parse quantity / unit / name
+                parsed = parse_ingredient(line)
+                qty  = _as_float(parsed["quantity"])
+                unit = (parsed["unit"] or "").lower()
+                ingredient_name = parsed["ingredient"]
+
+                # USDA lookup (cached)
+                fdc_id, usda_name = pick_usda_hit_cached(ingredient_name)
+                info   = fetch_food_cached(int(fdc_id))
+                macros = get_macronutrients(info)  # per-basis macros dict
+
+                # Overrides (zero-net items)
+                macros = override_macronutrients(macros, ingredient_name)
+
+                # Quantity to grams
+                g_per_unit = _unit_to_grams(info, unit)
+                if g_per_unit is None: # fallback guess
+                    g_per_unit = estimate_weight(ingredient_name)
+                grams_needed = qty * g_per_unit
+
+                # Scale macros to recipe usage
+                scaled = _scale_macros(macros, grams_needed)
+
+                # accumulate
+                row_macros["carbs"]    += scaled["carbs_g"]
+                row_macros["protein"]  += scaled["protein_g"]
+                row_macros["fat"]      += scaled["fat_g"]
+                row_macros["fiber"]    += scaled["fiber_g"]
+                row_macros["calories"] += scaled["calories"]
+
+                if verbose:
+                    end_ = time()
+                    print("Line Ingr Name: ", ingredient_name)
+                    print("USDA Ingr Name: ", usda_name)
+                    print("quantity: ", qty, unit)
+                    print("Estimated Weight (g): ", grams_needed)
+                    print("Basis (g): ", macros["basis_g"])
+                    print("Raw Carbs: ", macros["carbs_g"])
+                    print("Scaled Carbs: ", scaled["carbs_g"])
+                    print("Raw Protein: ", macros["protein_g"])
+                    print("Scaled Protein: ", scaled["protein_g"])
+                    print("Raw Fat: ", macros["fat_g"])
+                    print("Scaled Fat: ", scaled["fat_g"])
+                    print("Raw Fiber: ", macros["fiber_g"])
+                    print("Scaled Fiber: ", scaled["fiber_g"])
+                    print("Raw Calories: ", macros["calories"])
+                    print("Scaled Calories: ", scaled["calories"])
+                    print("Time Taken: ", end_ - start_)
+                    print()
+
+            except Exception as e:
+                # fail-soft on a single ingredient
+                print(e)
+                continue
+
+        # Final keto calculation
+        net_carbs = max(row_macros["carbs"] - row_macros["fiber"], 0)
+        carb_pct = (
+            (net_carbs * 4) / row_macros["calories"] * 100
+            if row_macros["calories"]
+            else 0
+        )
+        is_this_keto = carb_pct <= 20
+
+        if verbose:
+            print("total carbs: ", row_macros["carbs"])
+            print("total protein: ", row_macros["protein"])
+            print("total fat: ", row_macros["fat"])
+            print("total fiber: ", row_macros["fiber"])
+            print("is keto: ", is_this_keto)
+            print("\n")
+
+        return is_this_keto
+
+    except Exception as e:
+        # catastrophic failure – classify as non-keto for safety
+        print(e)
+        return False
