@@ -28,11 +28,10 @@ def _embedding(text):
 
 
 
-
 def parse_ingredient(line: str) -> dict:
     '''
     Each line consists of quantity, unit, ingredient and preparation. 
-    Rather than using NER, we are using a navie regex based approach to parse out quantity, unit and ingredient
+    Rather than using NER, we are using a navie regex based approach to parse out quantity, unit, ingredient and preparation.
 
     Ex:
     '2 (16 ounce) packages fresh mushrooms, stems removed' ----> (quantity='16', unit='ounce', ingredient='fresh mushrooms', preparation='stems removed')
@@ -67,12 +66,13 @@ def parse_ingredient(line: str) -> dict:
             break
 
     # Parse Ingredient
-    # For parsing out ingredient from preparation, we are simply splitting on the first comma - a naive rule
+    # For parsing out ingredient from preparation, we are simply splitting on the first comma - a naive rule.
+    # Of course this is not ideal, but since this is a structured dataset, it gets us most of the way to the answer.
     parts = [p.strip() for p in rest.split(',', 1)]
     ingredient = parts[0]
     preparation = parts[1] if len(parts) > 1 else ''
 
-    # Weight specifications found inside parantheticals can override weight specifications found outside parantheticals
+    # Weight specifications found inside parantheticals can override weight specifications found outside parantheticals.
     quantity = (inner_qty or outer_qty).strip()
     unit     = (inner_unit or outer_unit).lower().rstrip('s')
 
@@ -88,7 +88,8 @@ def parse_ingredient(line: str) -> dict:
 def search_food(query, page_size = 20, alpha = 0.3):
     '''
     Searches food candidates from USDA API.
-    Searches food from SR Legacy. These would return generic items and would have calories for macronutrients per 100g.    
+    Searches food from SR Legacy item type. These would return generic items and would contain macronutrient values on the basis of 100g.
+    Then candidates are ranked using a hybrid approach which combines USDA search score and query-result sentence embedding similarity.
     '''
     url = "https://api.nal.usda.gov/fdc/v1/foods/search"
     params_init = {
@@ -118,6 +119,8 @@ def search_food(query, page_size = 20, alpha = 0.3):
 def search_food_catch_all(query, page_size = 20, alpha = 0.3):
     '''
     Searches food candidates from USDA API.
+    Searches food from all item types. These would return all items (including branded items). The macronutrient values for branded items would on the basis of custom       
+    serving sizes as opposed to the standard 100 grams.
     Then candidates are ranked using a hybrid approach which combines USDA search score and query-result sentence embedding similarity.
     
     '''
