@@ -3,16 +3,18 @@ import re
 from functools import lru_cache
 
 import numpy as np
+import pandas as pd
 import requests
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 
 import json
 import pathlib
 import hashlib
 from time import time
 
-from CONSTANTS import (_MASS_UNITS, _NUMBER_RE, _FALLBACK_GRAMS, 
-                        _CAT_NAMES, _CAT_WEIGHTS, _ZERO_NET)
+from CONSTANTS import (_MASS_UNITS, _NUMBER_RE, _FALLBACK_GRAMS, __CAT_WEIGHTS_NAMES, 
+                       __CAT_WEIGHTS, __CAT_MACROS_NAMES, __CAT_MACROS, _ZERO_NET)
 
 
 API_KEY = "MdvR7gqeWDCMVDsspxgLNGqkjU8HNFNe3yoXlYER"
@@ -23,7 +25,6 @@ _EMB_MODEL = SentenceTransformer(MODEL_NAME)
 @lru_cache(maxsize=1024)
 def _embedding(text):
     return _EMB_MODEL.encode([text], normalize_embeddings=True, show_progress_bar=False)[0]
-
 
 
 def parse_ingredient(line: str) -> dict:
@@ -157,8 +158,12 @@ def pick_usda_hit(query):
     ranked = search_food(query, page_size=20)
 
     # If there is no SR_Legacy search results or if the top result isn't similar to the search query, we run the catch all search.
-    if not ranked or not ranked[0][-3] > 0.8:
-        ranked = search_food_catch_all(query, page_size=20)     
+    if not ranked or not ranked[0][-3] > 0.7:
+        ranked = search_food_catch_all(query, page_size=20)    
+
+    if not ranked:
+        return None, None
+
     return ranked[0][:2]
 
 
@@ -284,6 +289,27 @@ def override_macronutrients(macros, ingredient_name):
         macros = dict(carbs_g=0, protein_g=0, fat_g=0, fiber_g=0, calories=0, basis_g=1, source="override")
     return macros
 
+
+# precomputing embeddings for CATEGORIES of items.
+_EMBS_MACROS = np.stack([_embedding(CAT) for CAT in __CAT_MACROS_NAMES])
+
+def estimate_macronutrients(item):
+    '''
+    Estimates the macronutrients of an item when fdc_id is not found for an item. 
+    For items where there are no macros provided, we roughly estimate a macronutrient distribution for that item.
+    This happens by identifying what product category an item roughly belongs to by computing item-category similarity using sentence embeddings. 
+    Then, we return the macronutrients associated with that product category.
+
+    EX:
+    "Fresh herb leafy": dict(carbs_g=7,  protein_g=3,  fat_g=0.5,fiber_g=3,  calories=40).
+    "Tomato-based sauce": dict(carbs_g=12, protein_g=2,  fat_g=1,  fiber_g=2,  calories=65).
+    "Sweet pastry (danish/tart)": dict(carbs_g=55, protein_g=6,  fat_g=20, fiber_g=2,  calories=430).
+    '''
+    idx = int(np.argmax(_EMBS_MACROS @ _embedding(item)))
+    template = __CAT_MACROS[idx]
+    return {**template, "basis_g": 100}
+
+
 def _as_float(q):
     '''
     Converts string numerical values to float values. A simple eval fn cannot be used because the numbers are represnted in fractions.
@@ -305,7 +331,7 @@ def _as_float(q):
 
 
 # precomputing embeddings for CATEGORIES of items.
-_EMBS = np.stack([_embedding(CAT) for CAT in _CAT_NAMES])
+_EMBS_WEIGHTS = np.stack([_embedding(CAT) for CAT in __CAT_WEIGHTS_NAMES])
 
 
 def estimate_weight(item):
@@ -320,8 +346,8 @@ def estimate_weight(item):
     "a small piece of meat like chicken breast, pork loin, cod fillet, tofu slab, tempeh slice": 100 grams.
     "one large shellfish like lobster tail, king crab leg": 90 grams.
     '''
-    best = int(np.argmax(_EMBS @ _embedding(item)))
-    return float(_CAT_WEIGHTS[best])
+    best = int(np.argmax(_EMBS_WEIGHTS @ _embedding(item)))
+    return float(__CAT_WEIGHTS[best])
 
 
 def _unit_to_grams(info, unit):
@@ -386,19 +412,20 @@ def is_keto(ingredients, verbose: bool = False):
     Workflow (high-level)
 
     1. Parse each line with parse_ingredient
-       - extracts quantity / unit / ingredient / preparation  
-       - weights inside parenthetical overrides outer quantity if present
+       – extracts quantity / unit / ingredient / preparation  
+       – weights inside parenthetical overrides outer quantity if present
 
     2. Resolve the ingredient to a USDA FDC record  
-       - re-ranked results from API using a hybrid metric: semantic similarity + search score
-       - result cached on disk to avoid redundant API calls
+       – re-ranked results from API using a hybrid metric: semantic similarity + search score
+       – result cached on disk to avoid redundant API calls
 
     3. Fetch full nutrient data (cached).
 
     4. Apply heuristics 
-       - _unit_to_grams converts declared unit ---> grams using foodPortions or _FALLBACK_GRAMS ENUMS  
-       - if unit absent, estimate_weight guesses a default weight via sentence embedding similarity to category archetypes  
-       - certain zero-impact items (water, salt, artificial sweetners) override macros to 0
+       – _unit_to_grams converts declared unit ---> grams using foodPortions or _FALLBACK_GRAMS ENUMS  
+       – if unit absent, estimate_weight guesses a default weight via sentence embedding similarity to category archetypes
+       – if fdc_id absent, estimate_macronutrinets guesses a default macronutrinet distribution like estimate_weight function
+       – certain zero-impact items (water, salt, artificial sweetners) override macros to 0
 
     5. Scale the per-basis macros to the grams actually used, aggregate them for the whole recipe, and compute:
          net_carbs = max(total_carbs − total_fiber, 0)  
@@ -407,9 +434,9 @@ def is_keto(ingredients, verbose: bool = False):
     6. Classify as keto if `carb_pct` ≤ 20 %.
 
     Notes
-       - The 20 % threshold is deliberately lenient to offset uncertainty in
+    * The 20 % threshold is deliberately lenient to offset uncertainty in
       weight-guessing and label inaccuracies.
-       - Any exception inside the per-ingredient loop is caught and logged so a
+    * Any exception inside the per-ingredient loop is caught and logged so a
       single bad line does not abort the entire evaluation; the outer `try`
       ensures a final Boolean is always returned.
     """
@@ -436,8 +463,13 @@ def is_keto(ingredients, verbose: bool = False):
 
                 # USDA lookup (cached)
                 fdc_id, usda_name = pick_usda_hit_cached(ingredient_name)
-                info   = fetch_food_cached(int(fdc_id))
-                macros = get_macronutrients(info)  # per-basis macros dict
+
+                if not fdc_id:
+                    info = {}
+                    macros = estimate_macronutrients(ingredient_name)
+                else:
+                    info   = fetch_food_cached(int(fdc_id))
+                    macros = get_macronutrients(info)  # per-basis macros dict
 
                 # Overrides (zero-net items)
                 macros = override_macronutrients(macros, ingredient_name)
