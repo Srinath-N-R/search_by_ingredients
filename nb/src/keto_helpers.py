@@ -404,10 +404,9 @@ def _scale_macros(macros, grams_needed):
     return result
 
 
-def is_keto(ingredients, verbose: bool = False):
+def is_keto(ingredients, verbose = False):
     """
     Determine whether a recipe is ketogenic (≤ 20 % of calories from net carbs).
-
 
     Workflow (high-level)
 

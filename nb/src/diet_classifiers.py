@@ -13,12 +13,7 @@ except ImportError:
 
 
 from keto_helpers import is_keto
-
-
-def is_ingredient_vegan(ingredient: str) -> bool:
-    # TODO: Implement
-    return False
-
+from vegan_helpers import is_vegan
 
 
 def np_style_str_to_list(txt):
@@ -30,14 +25,6 @@ def np_style_str_to_list(txt):
     return re.findall(r"'([^']+)'", txt)
 
 
-def is_ingredient_vegan(ingredient):
-    # TODO: complete
-    return False    
-
-
-def is_vegan(ingredients: List[str]) -> bool:
-    return all(map(is_ingredient_vegan, ingredients))
-
 
 def main(args):
     ground_truth = pd.read_csv(args.ground_truth, index_col=None)
@@ -45,7 +32,7 @@ def main(args):
     try:
         start_time = time()
         ground_truth['keto_pred'] = ground_truth['ingredients'].apply(np_style_str_to_list).apply(is_keto)
-        ground_truth['vegan_pred'] = ground_truth['ingredients'].apply(is_vegan)
+        ground_truth['vegan_pred'] = ground_truth['ingredients'].apply(np_style_str_to_list).apply(is_vegan)
 
         end_time = time()
     except Exception as e:
