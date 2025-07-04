@@ -33,8 +33,18 @@
         <!-- Search Bar -->
         <div class="row justify-content-center mb-4">
             <div class="col-md-8">
-                <select class="form-select" id="ingredientSearch" multiple="multiple">
-                </select>
+                <!-- Select ingredient picker -->
+                <select class="form-select mb-2" id="ingredientSearch" multiple="multiple"></select>
+                <!-- Keto Toggle -->
+                <div class="form-check form-switch d-inline-block me-3">
+                    <input class="form-check-input" type="checkbox" id="ketoToggle">
+                    <label class="form-check-label" for="ketoToggle">Keto</label>
+                </div>
+                <!-- Vegan Toggle -->
+                <div class="form-check form-switch d-inline-block">
+                    <input class="form-check-input" type="checkbox" id="veganToggle">
+                    <label class="form-check-label" for="veganToggle">Vegan</label>
+                </div>
             </div>
         </div>
 
@@ -111,29 +121,36 @@
                 }
             });
 
-            // Handle search on ingredient selection
-            $('#ingredientSearch').on('change', function() {
-                const selectedIngredients = $(this).val();
-                if (selectedIngredients && selectedIngredients.length > 0) {
-                    searchRecipes(selectedIngredients);
-                } else {
-                    $('#resultsContainer').empty();
-                }
-            });
+            // Handle search on ingredient selection, include filters
+            $('#ingredientSearch, #ketoToggle, #veganToggle').on('change', searchRecipes);
 
             // Initialize modal
             const recipeModal = new bootstrap.Modal(document.getElementById('recipeModal'));
         });
 
-        function searchRecipes(ingredients) {
-            const query = ingredients.join(' ');
-            $.get('/search', { q: query })
-                .done(function(data) {
-                    displayResults(data.results);
-                })
-                .fail(function(error) {
-                    console.error('Search failed:', error);
-                });
+
+        function searchRecipes() {
+            // Current selections
+            const ingredients   = $('#ingredientSearch').val() || [];
+            const ketoChecked   = $('#ketoToggle').is(':checked');
+            const veganChecked  = $('#veganToggle').is(':checked');
+
+            // Build query-string parameters
+            const params = {};
+            if (ingredients.length)  params.q     = ingredients.join(' ');
+            if (ketoChecked)         params.keto  = 1;
+            if (veganChecked)        params.vegan = 1;
+
+            // Skip network only when nothing is selected
+            if (!ingredients.length && !ketoChecked && !veganChecked) {
+                $('#resultsContainer').empty();
+                return;
+            }
+
+            // Fetch filtered recipes
+            $.get('/search', params)
+            .done(data => displayResults(data.results))
+            .fail(err  => console.error('Search failed:', err));
         }
 
         function displayResults(results) {
