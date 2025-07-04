@@ -3,6 +3,7 @@ import string
 import json
 import re
 import logging
+import random
 from opensearchpy import OpenSearch
 from time import sleep
 import json
@@ -10,7 +11,11 @@ import pandas as pd
 from pathlib import Path
 from typing import List, Dict
 from argparse import ArgumentParser
+from keto_helpers import is_keto
+from vegan_helpers import is_vegan
 from tqdm import tqdm
+from joblib import Parallel, delayed
+from tqdm_joblib import tqdm_joblib
 
 # Configure logging
 logging.getLogger('opensearch').setLevel(logging.ERROR)
@@ -106,7 +111,9 @@ def create_index(client: OpenSearch):
                     "description": {"type": "text"},
                     "ingredients": {"type": "text"},
                     "instructions": {"type": "text"},
-                    "photo_url": {"type": "keyword"}
+                    "photo_url": {"type": "keyword"},
+                    "is_vegan": {"type": "boolean"},
+                    "is_keto": {"type": "boolean"}
                 }
             }
         }
@@ -125,10 +132,40 @@ def create_index(client: OpenSearch):
         logger.info(f"Created index: ingredients")
 
 
+def process_recipe(recipe):
+    try:
+        recipe["is_vegan"] = is_vegan(recipe["ingredients"])
+        recipe["is_keto"] = is_keto(recipe["ingredients"])
+
+    except Exception as e:
+        logger.warning(f"Failed to evaluate recipe: {e}")
+        recipe["is_vegan"] = None
+        recipe["is_keto"] = None
+    return recipe
+
+
+def parallel_process_recipe(recipes, n_jobs=8, log_every=100):
+    total = len(recipes)
+
+    def wrapped_process(r, i):
+        result = process_recipe(r)
+        if (i + 1) % log_every == 0 or (i + 1) == total:
+            logger.info(f"Processed {i + 1}/{total} recipes")
+        return result
+
+    return Parallel(n_jobs=n_jobs, prefer="processes")(
+        delayed(wrapped_process)(recipe, i) for i, recipe in enumerate(recipes)
+    )
+
+
 def batch_index_recipes(client: OpenSearch, recipes: List[Dict], batch_size: int = 10240):
     """Index a batch of recipes into OpenSearch"""
     actions = []
     ingredients = set()
+    logger.info("Parallel Processing Recipes")
+    recipes = parallel_process_recipe(recipes, n_jobs=8)
+    logger.info("Parallel Processing Recipes Done!!")
+
     for recipe in recipes:
         actions.append({"index": {"_index": "recipes"}})
         actions.append(recipe)
