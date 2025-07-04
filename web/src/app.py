@@ -78,9 +78,9 @@ def home():
 
 @app.route("/select2", methods=["GET"])
 def select2():
-    q = request.args.get("q", "").strip()
-    results = [{"id": id_, "text": txt_}
-               for id_, txt_ in enumerate(ingredients) if q in txt_]
+    q = request.args.get("q", "").strip().lower()
+    results = [ {"id": txt, "text": txt}
+                for txt in ingredients if q in txt.lower() ]
     results = sorted(results, key=lambda x: len(x["text"]))
     return jsonify({"results": results})
 
