@@ -6,7 +6,6 @@ from vegan_helpers import is_vegan
 from time import sleep
 import sys
 import logging
-import os
 import time
 
 # Configure logging - keep it simple
