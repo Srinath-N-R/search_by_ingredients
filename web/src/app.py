@@ -1,7 +1,8 @@
 from flask import Flask, request, jsonify, render_template
 from opensearchpy import OpenSearch
 from decouple import config
-from diet_classifiers import is_keto, is_vegan
+from keto_helpers import is_keto
+from vegan_helpers import is_vegan
 from time import sleep
 import sys
 import logging

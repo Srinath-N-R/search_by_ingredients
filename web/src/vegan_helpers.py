@@ -1,14 +1,19 @@
 import re
 import unicodedata
 import numpy as np
+import os
 
 from keto_helpers import parse_ingredient, _embedding, pick_usda_hit_cached, fetch_food_cached
 
 
-EMBED_ALL = np.load("vegan_dependencies/vegan_embeddings.npy")
-VEGAN_INGREDIENTS = np.load("vegan_dependencies/vegan_ingredients.npy")
-NON_VEGAN_INGREDIENTS = np.load("vegan_dependencies/non_vegan_ingredients.npy")
-ALL_INGREDIENTS = np.concat([VEGAN_INGREDIENTS, NON_VEGAN_INGREDIENTS])
+BASE_DIR = os.path.dirname(__file__)
+VEGAN_DEP_DIR = os.path.join(BASE_DIR, "vegan_dependencies")
+
+EMBED_ALL = np.load(os.path.join(VEGAN_DEP_DIR, "vegan_embeddings.npy"))
+VEGAN_INGREDIENTS = np.load(os.path.join(VEGAN_DEP_DIR, "vegan_ingredients.npy"))
+NON_VEGAN_INGREDIENTS = np.load(os.path.join(VEGAN_DEP_DIR, "non_vegan_ingredients.npy"))
+
+ALL_INGREDIENTS = np.concatenate([VEGAN_INGREDIENTS, NON_VEGAN_INGREDIENTS])
 
 
 def clean_ingredients(txt):

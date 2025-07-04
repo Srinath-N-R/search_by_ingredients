@@ -1,6 +1,5 @@
 import sys
 from argparse import ArgumentParser
-from typing import List
 from time import time
 import pandas as pd
 import re
