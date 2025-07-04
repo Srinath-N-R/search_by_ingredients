@@ -87,56 +87,66 @@ def select2():
     return jsonify({"results": results})
 
 
+def build_query(ing_text: str, keto: bool, vegan: bool) -> dict:
+    """
+    Build an OpenSearch bool query based on ing_text and keto, vegan filters.
+    """
+    bool_q = {"filter": []}
+
+    if ing_text:
+        bool_q["must"] = [{
+            "match": {
+                "ingredients": {
+                    "query": ing_text,
+                    "fuzziness": "AUTO"
+                }
+            }
+        }]
+    else:
+        bool_q["must"] = [{"match_all": {}}]
+
+    if keto:
+        bool_q["filter"].append({"term": {"is_keto": True}})
+    if vegan:
+        bool_q["filter"].append({"term": {"is_vegan": True}})
+
+    return {"query": {"bool": bool_q}, "size": 12}
+
+
 @app.route('/search', methods=['GET'])
 def search_by_ingredients():
     start_time = time.time()
 
-    ingredient = request.args.get('q', '')
-    if not ingredient:
+    q_txt   = (request.args.get('q') or '').strip()
+    keto_q  = request.args.get('keto')  == '1'
+    vegan_q = request.args.get('vegan') == '1'
+
+    if not q_txt:
         return jsonify({'error': 'Please provide an ingredient name'}), 400
 
     parse_start = time.time()
 
-    ingredient_ids = [int(id_) for id_ in ingredient.split() if id_.isdigit()]
-    ingredient_ids = [ingredients[id_] for id_ in ingredient_ids]
-    ingredient = " ".join(ingredient_ids)
-
     logger.info(f"Parsing time: {time.time() - parse_start:.3f} seconds")
 
-
-    # Create the search query
-    query = {
-        "query": {
-            "match": {
-                "ingredients": {
-                    "query": ingredient,
-                    "fuzziness": "AUTO"
-                }
-            }
-        }
-    }
-
+    body = build_query(q_txt, keto_q, vegan_q)
+    
     search_start = time.time()
     try:
         # Execute the search
-        response = client.search(
-            index="recipes",
-            body=query,
-            size=12
-        )
+        response = client.search(index="recipes", body=body, size=12)
         logger.info(f"OpenSearch query time: {time.time() - search_start:.3f} seconds")
 
         # Format the results
         hits = response['hits']['hits']
         results = [{
-            'title': hit['_source']['title'],
-            'description': hit['_source'].get('description', ''),
-            'ingredients': hit['_source']['ingredients'],
-            'instructions': hit['_source'].get('instructions', ''),
-            'photo_url': hit['_source'].get('photo_url', ''),
-            'keto': is_keto(hit['_source']['ingredients']),
-            'vegan': is_vegan(hit['_source']['ingredients']),
-            'score': hit['_score']
+            "title": hit["_source"]["title"],
+            "description": hit["_source"].get("description", ""),
+            "ingredients": hit["_source"]["ingredients"],
+            "instructions": hit["_source"].get("instructions", ""),
+            "photo_url": hit["_source"].get("photo_url", ""),
+            "keto": hit["_source"].get("is_keto",  False),
+            "vegan": hit["_source"].get("is_vegan", False),
+            "score": hit["_score"]
         } for hit in hits]
 
         logger.info(f"Total /search endpoint time: {time.time() - start_time:.3f} seconds")
