@@ -7,6 +7,7 @@ from time import sleep
 import sys
 import logging
 import os
+import time
 
 # Configure logging - keep it simple
 logging.basicConfig(
@@ -89,13 +90,20 @@ def select2():
 
 @app.route('/search', methods=['GET'])
 def search_by_ingredients():
+    start_time = time.time()
+
     ingredient = request.args.get('q', '')
     if not ingredient:
         return jsonify({'error': 'Please provide an ingredient name'}), 400
 
+    parse_start = time.time()
+
     ingredient_ids = [int(id_) for id_ in ingredient.split() if id_.isdigit()]
     ingredient_ids = [ingredients[id_] for id_ in ingredient_ids]
     ingredient = " ".join(ingredient_ids)
+
+    logger.info(f"Parsing time: {time.time() - parse_start:.3f} seconds")
+
 
     # Create the search query
     query = {
@@ -109,6 +117,7 @@ def search_by_ingredients():
         }
     }
 
+    search_start = time.time()
     try:
         # Execute the search
         response = client.search(
@@ -116,6 +125,7 @@ def search_by_ingredients():
             body=query,
             size=12
         )
+        logger.info(f"OpenSearch query time: {time.time() - search_start:.3f} seconds")
 
         # Format the results
         hits = response['hits']['hits']
@@ -129,6 +139,9 @@ def search_by_ingredients():
             'vegan': is_vegan(hit['_source']['ingredients']),
             'score': hit['_score']
         } for hit in hits]
+
+        logger.info(f"Total /search endpoint time: {time.time() - start_time:.3f} seconds")
+
         return jsonify({
             'total': response['hits']['total']['value'],
             'results': results

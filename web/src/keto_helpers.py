@@ -8,7 +8,9 @@ import requests
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
+import os
 import json
+import logging
 import pathlib
 import hashlib
 from time import time
@@ -16,6 +18,26 @@ from time import time
 from CONSTANTS import (_MASS_UNITS, _NUMBER_RE, _FALLBACK_GRAMS, __CAT_WEIGHTS_NAMES, 
                        __CAT_WEIGHTS, __CAT_MACROS_NAMES, __CAT_MACROS, _ZERO_NET)
 
+
+# Configure logging - keep it simple
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s'  # Simplified format
+)
+# Silence noisy loggers
+logging.getLogger('opensearchpy').setLevel(logging.ERROR)  # Only show errors
+logging.getLogger('urllib3').setLevel(logging.ERROR)       # Only show errors
+logging.getLogger('opensearch').setLevel(logging.ERROR)    # Only show errors
+logger = logging.getLogger(__name__)
+
+
+BASE_DIR = os.path.dirname(__file__)
+
+_LOOKUP_DIR = pathlib.Path(BASE_DIR) / "usda_lookup_cache"
+_LOOKUP_DIR.mkdir(exist_ok=True)
+
+_CACHE_DIR = pathlib.Path(BASE_DIR) / "usda_json_cache"
+_CACHE_DIR.mkdir(exist_ok=True)
 
 API_KEY = "MdvR7gqeWDCMVDsspxgLNGqkjU8HNFNe3yoXlYER"
 MODEL_NAME = "sentence-transformers/all-mpnet-base-v2"
@@ -167,10 +189,6 @@ def pick_usda_hit(query):
     return ranked[0][:2]
 
 
-_LOOKUP_DIR = pathlib.Path("./usda_lookup_cache")
-_LOOKUP_DIR.mkdir(exist_ok=True)
-
-
 def pick_usda_hit_cached(ingredient):
     '''
     Caches the fdc_id and usda_name for the query ingredient after searching it using pick_usda_hit.
@@ -197,9 +215,6 @@ def fetch_food(fdc_id: int):
     url = f"https://api.nal.usda.gov/fdc/v1/food/{fdc_id}?api_key={API_KEY}"
     return requests.get(url, timeout=10).json()
 
-
-_CACHE_DIR = pathlib.Path("./usda_json_cache")
-_CACHE_DIR.mkdir(exist_ok=True)
 
 def fetch_food_cached(fdc_id):
     '''
@@ -326,7 +341,7 @@ def _as_float(q):
             return float(fractions.Fraction(q))
         return float(fractions.Fraction(q)) if _NUMBER_RE.match(q) else float(q)
     except Exception as e:
-        print(f"Could not parse quantity {q} because of {e} – defaulting to 1")
+        logger.info(f"Could not parse quantity {q} because of {e} – defaulting to 1")
         return 1.0
 
 
@@ -404,6 +419,67 @@ def _scale_macros(macros, grams_needed):
     return result
 
 
+def get_line_macros(line, row_macros, verbose):
+    start_ = time()  # performance timing
+
+    # Parse quantity / unit / name
+    parsed = parse_ingredient(line)
+    qty  = _as_float(parsed["quantity"])
+    unit = (parsed["unit"] or "").lower()
+    ingredient_name = parsed["ingredient"]
+
+    # USDA lookup (cached)
+    fdc_id, usda_name = pick_usda_hit_cached(ingredient_name)
+
+    if not fdc_id:
+        info = {}
+        macros = estimate_macronutrients(ingredient_name)
+    else:
+        info   = fetch_food_cached(int(fdc_id))
+        macros = get_macronutrients(info)  # per-basis macros dict
+
+    # Overrides (zero-net items)
+    macros = override_macronutrients(macros, ingredient_name)
+
+    # Quantity to grams
+    g_per_unit = _unit_to_grams(info, unit)
+    if g_per_unit is None: # fallback guess
+        g_per_unit = estimate_weight(ingredient_name)
+    grams_needed = qty * g_per_unit
+
+    # Scale macros to recipe usage
+    scaled = _scale_macros(macros, grams_needed)
+
+    # accumulate
+    row_macros["carbs"]    += scaled["carbs_g"]
+    row_macros["protein"]  += scaled["protein_g"]
+    row_macros["fat"]      += scaled["fat_g"]
+    row_macros["fiber"]    += scaled["fiber_g"]
+    row_macros["calories"] += scaled["calories"]
+
+    if verbose:
+        end_ = time()
+        logger.info(f"Line Ingr Name: {ingredient_name}")
+        logger.info(f"USDA Ingr Name: {usda_name}")
+        logger.info(f"quantity: {qty} {unit}")
+        logger.info(f"Estimated Weight (g): {grams_needed}")
+        logger.info(f"Basis (g): {macros['basis_g']}")
+        logger.info(f"Raw Carbs: {macros['carbs_g']}")
+        logger.info(f"Scaled Carbs: {scaled['carbs_g']}")
+        logger.info(f"Raw Protein: {macros['protein_g']}")
+        logger.info(f"Scaled Protein: {scaled['protein_g']}")
+        logger.info(f"Raw Fat: {macros['fat_g']}")
+        logger.info(f"Scaled Fat: {scaled['fat_g']}")
+        logger.info(f"Raw Fiber: {macros['fiber_g']}")
+        logger.info(f"Scaled Fiber: {scaled['fiber_g']}")
+        logger.info(f"Raw Calories: {macros['calories']}")
+        logger.info(f"Scaled Calories: {scaled['calories']}")
+        logger.info(f"Time Taken: {end_ - start_:.2f} seconds")
+        logger.info("")
+
+    return row_macros
+
+
 def is_keto(ingredients, verbose = False):
     """
     Determine whether a recipe is ketogenic (≤ 20 % of calories from net carbs).
@@ -442,76 +518,21 @@ def is_keto(ingredients, verbose = False):
 
     try:
         if verbose:
-            print(ingredients)
+            logger.info(str(ingredients))
 
         # running totals for the whole recipe
+        
         row_macros = dict(carbs=0.0, protein=0.0, fat=0.0, fiber=0.0, calories=0.0)
 
         for line in ingredients:
             try:
                 if verbose:
-                    print(line)
-
-                start_ = time()  # performance timing
-
-                # Parse quantity / unit / name
-                parsed = parse_ingredient(line)
-                qty  = _as_float(parsed["quantity"])
-                unit = (parsed["unit"] or "").lower()
-                ingredient_name = parsed["ingredient"]
-
-                # USDA lookup (cached)
-                fdc_id, usda_name = pick_usda_hit_cached(ingredient_name)
-
-                if not fdc_id:
-                    info = {}
-                    macros = estimate_macronutrients(ingredient_name)
-                else:
-                    info   = fetch_food_cached(int(fdc_id))
-                    macros = get_macronutrients(info)  # per-basis macros dict
-
-                # Overrides (zero-net items)
-                macros = override_macronutrients(macros, ingredient_name)
-
-                # Quantity to grams
-                g_per_unit = _unit_to_grams(info, unit)
-                if g_per_unit is None: # fallback guess
-                    g_per_unit = estimate_weight(ingredient_name)
-                grams_needed = qty * g_per_unit
-
-                # Scale macros to recipe usage
-                scaled = _scale_macros(macros, grams_needed)
-
-                # accumulate
-                row_macros["carbs"]    += scaled["carbs_g"]
-                row_macros["protein"]  += scaled["protein_g"]
-                row_macros["fat"]      += scaled["fat_g"]
-                row_macros["fiber"]    += scaled["fiber_g"]
-                row_macros["calories"] += scaled["calories"]
-
-                if verbose:
-                    end_ = time()
-                    print("Line Ingr Name: ", ingredient_name)
-                    print("USDA Ingr Name: ", usda_name)
-                    print("quantity: ", qty, unit)
-                    print("Estimated Weight (g): ", grams_needed)
-                    print("Basis (g): ", macros["basis_g"])
-                    print("Raw Carbs: ", macros["carbs_g"])
-                    print("Scaled Carbs: ", scaled["carbs_g"])
-                    print("Raw Protein: ", macros["protein_g"])
-                    print("Scaled Protein: ", scaled["protein_g"])
-                    print("Raw Fat: ", macros["fat_g"])
-                    print("Scaled Fat: ", scaled["fat_g"])
-                    print("Raw Fiber: ", macros["fiber_g"])
-                    print("Scaled Fiber: ", scaled["fiber_g"])
-                    print("Raw Calories: ", macros["calories"])
-                    print("Scaled Calories: ", scaled["calories"])
-                    print("Time Taken: ", end_ - start_)
-                    print()
+                    logger.info(line)
+                row_macros = get_line_macros(line, row_macros, verbose)
 
             except Exception as e:
                 # fail-soft on a single ingredient
-                print(e)
+                logger.warning(f"Error parsing line '{line}': {e}")
                 continue
 
         # Final keto calculation
@@ -524,12 +545,12 @@ def is_keto(ingredients, verbose = False):
         is_this_keto = carb_pct <= 20
 
         if verbose:
-            print("total carbs: ", row_macros["carbs"])
-            print("total protein: ", row_macros["protein"])
-            print("total fat: ", row_macros["fat"])
-            print("total fiber: ", row_macros["fiber"])
-            print("is keto: ", is_this_keto)
-            print("\n")
+            logger.info(f'total carbs: {row_macros["carbs"]}')
+            logger.info(f'total protein: {row_macros["protein"]}')
+            logger.info(f'total fat:  {row_macros["fat"]}')
+            logger.info(f'total fiber: {row_macros["fiber"]}')
+            logger.info(f'is keto: {is_this_keto}')
+            logger.info("")
 
         return is_this_keto
 
