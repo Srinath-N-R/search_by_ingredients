@@ -420,6 +420,7 @@ def _scale_macros(macros, grams_needed):
 
 
 def get_line_macros(line, row_macros, verbose):
+
     start_ = time()  # performance timing
 
     # Parse quantity / unit / name
