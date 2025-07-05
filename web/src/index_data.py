@@ -1,12 +1,12 @@
+import os
 import sys
-import string
 import json
+import string
 import re
 import logging
-import random
+import hashlib
 from opensearchpy import OpenSearch
 from time import sleep
-import json
 import pandas as pd
 from pathlib import Path
 from typing import List, Dict
@@ -15,12 +15,21 @@ from keto_helpers import is_keto
 from vegan_helpers import is_vegan
 from tqdm import tqdm
 from joblib import Parallel, delayed
-from tqdm_joblib import tqdm_joblib
+from pathlib import Path
 
 # Configure logging
 logging.getLogger('opensearch').setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+BASE_DIR  = Path(__file__).resolve().parent
+CACHE_DIR = BASE_DIR / "diet_flags"
+CACHE_DIR.mkdir(exist_ok=True)
+
+def recipe_filename(title: str) -> Path:
+    key = hashlib.md5(title.encode()).hexdigest()
+    return CACHE_DIR / f"{key}.json"
 
 
 def normalize_ingredient(ingredient: str) -> str:
@@ -133,14 +142,41 @@ def create_index(client: OpenSearch):
 
 
 def process_recipe(recipe):
+    """
+    Compute is_vegan / is_keto once per recipe and cache on disk.
+    """
+    fpath = recipe_filename("|||".join(recipe["ingredients"]))
+
+    if fpath.exists():
+        try:
+            with open(fpath, "r") as f:
+                flags = json.load(f)
+            recipe["is_vegan"] = flags["is_vegan"]
+            recipe["is_keto"]  = flags["is_keto"]
+            return recipe
+        except Exception as e:
+            logger.warning(f"Corrupt cache file {fpath}: {e}; recomputing.")
+
     try:
         recipe["is_vegan"] = is_vegan(recipe["ingredients"])
-        recipe["is_keto"] = is_keto(recipe["ingredients"])
-
+        recipe["is_keto"]  = is_keto(recipe["ingredients"])
     except Exception as e:
-        logger.warning(f"Failed to evaluate recipe: {e}")
+        logger.warning(f"Failed to evaluate recipe '{recipe['title']}': {e}")
         recipe["is_vegan"] = None
-        recipe["is_keto"] = None
+        recipe["is_keto"]  = None
+
+    try:
+        tmp = fpath.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(
+                {"is_vegan": recipe["is_vegan"], "is_keto": recipe["is_keto"]},
+                f,
+                separators=(",", ":")
+            )
+        os.replace(tmp, fpath)
+    except Exception as e:
+        logger.warning(f"Could not write cache for '{recipe['title']}': {e}")
+
     return recipe
 
 
